@@ -31,7 +31,7 @@ provide additional insights on what performance indicators are the most relevant
 
 Opening working directory
 ```{r}
-setwd('C:\\Users\\Gian\\Desktop\\Luiss\\Py_R_Project\\UFC_DS')
+setwd('C:\\Users\\Utente\\Desktop\\Luiss\\PyR_Final')
 ```
 Importing libraries
 ```{r}
