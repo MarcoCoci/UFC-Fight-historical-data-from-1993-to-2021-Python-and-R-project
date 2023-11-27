@@ -1,0 +1,712 @@
+LUISS 'Guido Carli'  
+A.Y. 2023-24 - MSc in Data Science and Management   
+Final project submission
+Coci Marco (786471) - Cecere Rachele (775701) - Isayas Aida (772631) - Marchioni Gian Lorenzo (788811)
+
+OSEMN pipeline: UFC matches dataset
+The dataset, taken from [kaggle](https://https://www.kaggle.com/datasets/rajeevw/ufcdata/data), 
+records matches held from 1993, when the UFC was founded, up to 2021.  
+
+After scrubbing, exploration and due preprocessing, we will train a logistic regression 
+model to predict a match outcome based on physical features of fighters and also some 
+past performance indicators and statistics.
+
+In this R notebook we will focus more on the scrubbing, preprocessing, and modeling. 
+The submitted Python notebook will instead have more substantial exploration and visualization, 
+and the two shouldbe intended as complementary to each other,
+
+Each row contains fighter data, denoted by the color of its corner, Red or Blue.
+
+From the link we have taken two files:
+- `data.csv`
+- `raw_total_fight_data.csv`
+
+The first contains processed data and fighters statistics updated for each match.
+
+Then, to help identify the most relevant features, we use the second dataset taken 
+from the same author, where the win criteria for each match is recorded.  
+Knowing whether the matches are most often won by KO, judging or other ways may
+provide additional insights on what performance indicators are the most relevant.
+
+
+Opening working directory
+```{r}
+setwd('C:\\Users\\Gian\\Desktop\\Luiss\\Py_R_Project\\UFC_DS')
+```
+Importing libraries
+```{r}
+library(naniar)
+library(VIM)
+library(FactoMineR)
+library(MASS)
+library(ggplot2)
+library(caret)
+library(dplyr)
+```
+Opening the raw dataset 'raw_total_fight_data.csv'.
+We first want to check in which way matches are most often won, to aid in feature
+selection.
+We consider only the Lightweight weight class, as it has the highest number of 
+matches, as will be later shown.
+To select it, we will need to look for the string 'lightweight' in the column
+'Fight_type', that contains the type of event or tournament.
+```{r}
+df<-read.csv2('raw_total_fight_data.csv')
+unique(df$Fight_type)
+```
+```{r}
+# Filter dataframe for only 'lightweight' fights
+lightweight_df <- df[grepl("lightweight", df$Fight_type, ignore.case = TRUE), ]
+# Plotting the histogram
+ggplot(lightweight_df, aes(x = win_by)) +
+  geom_histogram(stat = "count", fill = "#ff7bef", color = "#222222") +
+  theme_minimal() +
+  labs(title = "Frequency of Win Types in Lightweight Fights", x = "Win Type", y = "Frequency") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) # Adjusting x labels for better readability
+```
+Now importing the processed dataset:
+```{r}
+df<-read.csv('data.csv')
+```
+
+We will focus on the most numerous weight class, Lightweight:
+```{r}
+print(table(df$weight_class))
+```
+By printing the column names and using the legend provided on the kaggle page, we can interpret the more 'cryptic' columns:
+- `R` and `B` prefix signifies red and blue corner fighter stats
+- `avg` indicates the average over a fighters past matches, up to the recorded one
+- `landed` denotes actions or strikes completed successfully
+- `attempted` denotes unsuccessful or weak actions or strikes
+- `pct` indicates the ratio of landed over attempted
+- `opp` containing columns is the average of damage done by the opponent on the fighter
+- `KD`: number of knockdowns
+- `SIG_STR`: significant strikes
+- `TOTAL_STR`: total strikes
+- `TD`: takedowns
+- `SUB_ATT`: submission attempts
+- `HEAD`: significant strikes to the head
+- `BODY`: significant strikes to the body
+- `CLINCH`: significant strikes in the clinch
+- `GROUND`: significant strikes on the ground
+- `total_rounds_fought`: average of total rounds fought by the fighter
+```{r}
+colnames(df)
+```
+It is clear from the previous histogram that most fight end by KO, 
+Judge decision or submission.
+From this we can desume that features that are most likely to influence victories,
+beside physical characteristics, are performance indicators such as:
+
+Number of significant strikes landed: judges determine a winner by counting the number of strikes landed
+Number of strikes to the head landed: likely to knock-out an athlete
+Number of take downs, knock-downs: throwing the opponent to the floor successfully may lead to a submission.
+
+We also included variables that take into account:
+
+Victories and losses amount
+Victory and loss streaks
+Amount of rounds fought
+
+Since within a single weight class weight variation is small, as far as physical 
+features we considered:
+
+Height: in cm
+Reach: arm length, in cm
+Age
+
+We will now select these features from the dataframe, and also cast the 'date' 
+column from character type to date.
+```{r}
+lightweights_df<-df%>%
+  select('R_fighter', 'B_fighter', 'Winner', 'weight_class','date',
+                       'B_total_rounds_fought', 'B_current_win_streak', 'B_current_lose_streak', 'B_wins', 'B_longest_win_streak', 'B_losses',
+                       'B_Height_cms', 'B_Reach_cms', 'B_age', 
+                       'B_avg_SIG_STR_landed', 'B_avg_HEAD_landed', 'B_avg_KD', 'B_avg_TD_landed', 
+                       'R_total_rounds_fought', 'R_current_win_streak', 'R_current_lose_streak', 'R_wins', 'R_longest_win_streak', 'R_losses', 
+                       'R_Height_cms', 'R_Reach_cms', 'R_age', 
+                       'R_avg_SIG_STR_landed','R_avg_HEAD_landed','R_avg_KD','R_avg_TD_landed') %>%
+  mutate(date=as.Date(date, format='%Y-%m-%d')) %>%
+  filter(weight_class=='Lightweight')
+```
+
+NA handling.
+First, count them:
+```{r}
+na_count <- sapply(lightweights_df, function(x) sum(is.na(x)))
+print(na_count)
+```
+```{r}
+gg_miss_var(lightweights_df)
+```
+
+Missing values in B_avg_SIG_STR_landed, B_avg_HEAD_landed, B_avg_TD_landed, 
+B_avg_KD, R_avg_SIG_STR_landed, R_avg_HEAD_landed, R_avg_TD_landed, R_avg_KD are
+due to the fact that there is no past data for first time fighters.
+
+Let us consider, for instance, all matches of the fighter "Clay Guida"
+```{r}
+guida_fights <- lightweights_df %>%
+  filter(R_fighter == "Clay Guida" | B_fighter == "Clay Guida") %>%
+  select(R_fighter, B_fighter, date, R_avg_SIG_STR_landed, R_avg_TD_landed, B_avg_SIG_STR_landed, B_avg_TD_landed) %>%
+  arrange(date)
+
+print(guida_fights)
+```
+His first match, as a Red fighter in 2006-10-14 has indeed NA for all four past
+statistics column.
+
+This does not happen for all fighters in lightweights_df, as they may have started 
+their career in a different weight class.
+
+It is then useful to plot a matrix that showcases the arrangement of null values.
+To do this, we will first sort the matches in ascending chronological order: we
+expect to see some time related change, since the data spans almost 20 years of
+UFC history.
+```{r}
+lightweights_df %>% 
+  arrange(desc(date)) %>%
+  select(where(~any(is.na(.)))) %>%
+  matrixplot(. ,main="Missing value matrix", col = "#c71585")
+```
+
+The matrixplot above confirms that NAs do have a pattern dependent on time. 
+Mind that dates are sorted so that the oldest matches are at top of the plot.
+Considering Height, Age and Especially Reach, it does seem that old data is more
+likely to have missing values. 
+It is plausible that old measurements were lost, or in case of Reach 
+(2nd and 9th columns), its measurement was not as common.
+
+Also NAs occur at the same location for all four past statistics columns, which
+confirms the assumption that it does happen systematically for first time fighters.
+
+This hypothesis would also explain why the first years of UFC competitions feature
+so many missing values for past fighter statistics.
+
+One thing to note is that missing values for these four columns are much more 
+frequent for Blue fighters (263 NAs) than for Red (109 NAs). 
+Combined with the fact that NAs are due to a fighter being a new participant, 
+this suggests a potential bias in color assignment that will be discussed 
+further on.
+
+We have thus identified different patterns of missing data:
+
+MCAR (Missing Completely at Random):
+Definition: The missingness of data is independent of both observed and unobserved data.
+Example: The small number of missing values in `B_Height_cms` (4) and `R_Height_cms` (1) 
+might be due to random data entry errors.
+
+MAR (Missing at Random):
+Definition: The propensity for a data point to be missing is not related to the missing data, 
+but it is related to some of the observed data.
+Example: The missing values in `B_Reach_cms` (159) and `R_Reach_cms` (47) could be MAR. 
+If older records are less likely to have reach data, the missingness is related to 
+the date, but not directly to reach itself.
+
+MNAR (Not Missing at Random):
+This is the case for `avg_SIG_STR_landed`, `avg_HEAD_landed`, `avg_KD` and 
+`avg_TD_landed`, that have systematic reason for being missing.
+
+To salvage these, an approach would to take the minimum value for all future
+fights of an athlete, under the conservative assumption that a fighter performs
+worse when he is just at the beginning of his UFC career.  
+However, when we looked at the results, we realized that the median shifted a lot 
+downwards and would alter our results. Also, our model would have been trained on 
+matches with stats that may not reflect reality.  
+
+Consequently, we opted to instead remove the null values, but still continue 
+to use those variables since we expect them to be useful.
+
+We will then omit NAs, and also matches that ended with a draw, which are just
+19:
+```{r}
+print(table(lightweights_df$Winner))
+```
+```{r}
+lightweights_df<- lightweights_df %>%
+  na.omit() %>%
+  filter(Winner!='Draw')
+
+nrow(lightweights_df)
+```
+We now have 720 entries to use for statistical modeling.
+
+We will perform a logistic regression using, as predictors:
+- Difference in height
+- Difference in reach
+- Difference in age
+- Difference of number of rounds fought (Exp)
+- Difference of number of victories
+- Difference of number of losses
+- Difference of longest win streak (LWS)
+- Difference of current win streak (CWS)
+- Difference of current loss streak (CLS)
+- Difference in average Significant Strikes landed per match
+- Difference in average Take downs landed per match
+- Difference in the so called 'Ape Index', defined as Reach-Height
+- Corner color
+
+The last entry is due to the fact that fighters in the red corner win more often
+than fighters in the blue corner:
+```{r}
+win_counts<- table(lightweights_df$Winner)
+
+ggplot(data=as.data.frame(win_counts), aes(x=Var1, y=Freq))+
+  geom_bar(stat='identity', fill=c('#0af6ee', '#ff7bef'), color='#222222')+
+  labs(title = 'Number of wins by corner color', x='Corner color', y='Number of victories')+
+  theme_minimal()
+```
+```{r}
+print(paste('Red victories:', win_counts['Red']))
+print(paste('Blue victories:', win_counts['Blue']))
+print(paste('Percentage of blue victories:', round(100*win_counts['Red']/nrow(lightweights_df),0), '%' ))
+print(paste('Percentage of blue victories:', round(100*win_counts['Blue']/nrow(lightweights_df),0), '%' ))
+```
+
+Preprocessing:
+The counts of victories for each color is already sufficient to justify its
+potential as a predictor in out model. 
+Our EDA on python, then, showed clear differences in 
+distributions for each color for these features:
+- Number of victories
+- Number of rounds fought
+- Longest Win streak
+We therefore expect these to be correlated to color assignment. Thus, before
+training our win prediction model, we will perform a logistic regression between
+other features and color, in order to quantify these correlations.
+
+To use color as a predictor, we need first to 'anonymize' the fighters.
+We will pick a random color for each match, and create a binary variable equal 
+to 1 if a fighter matches said color, 0 otherwise.
+We'll assign the label 'Fighter 1' or 'F1' to the fighter of that color, and the 
+outcome of the match will be stored into the binary variable 'F1 Win'.
+Not that, to address the slight imbalance in the response variable in favor of
+Red winning more often, we will later check that the zero rule predictor accuracy 
+is close to 50% on the training set.
+```{r}
+set.seed(69)
+lightweights_df <- lightweights_df %>%
+  mutate(
+    random_corner=sample(c('Red', 'Blue'), nrow(.), replace = TRUE, prob=c(0.5,0.5)),
+    F1_color=as.numeric(random_corner=='Red'),
+    F1_win=ifelse(random_corner==Winner, 1,0)
+  )
+```
+Let's then compute the ape index for each fighter.
+It is the difference between reach and height, and it another physical measurement
+often considered in sports.
+A high ape index signifies either long arms in relation to height, or short 
+height compared to arm span, therefore rendering the subject more akin to a 
+primate.
+In martial arts, a high ape index is considered beneficial.
+```{r}
+lightweights_df <- lightweights_df %>%
+  mutate(
+    R_ape_index=R_Reach_cms-R_Height_cms,
+    B_ape_index=B_Reach_cms-B_Height_cms
+    )
+```
+
+We then compute the differences for the aforementioned features:
+```{r}
+lightweights_df <- lightweights_df %>%
+  mutate(
+    Height_diff_F1_F2 = ifelse(random_corner == "Red",
+                               R_Height_cms - B_Height_cms,
+                               B_Height_cms - R_Height_cms),
+    Reach_diff_F1_F2 = ifelse(random_corner == "Red",
+                              R_Reach_cms - B_Reach_cms,
+                              B_Reach_cms - R_Reach_cms),
+    Age_diff_F1_F2 = ifelse(random_corner == "Red",
+                            R_age - B_age,
+                            B_age - R_age),
+    Exp_diff_F1_F2 = ifelse(random_corner == "Red",
+                            R_total_rounds_fought - B_total_rounds_fought,
+                            B_total_rounds_fought - R_total_rounds_fought),
+    Wins_diff_F1_F2 = ifelse(random_corner == "Red",
+                            R_wins - B_wins,
+                            B_wins - R_wins),
+    Losses_diff_F1_F2 = ifelse(random_corner == "Red",
+                            R_losses - B_losses,
+                            B_losses - R_losses),
+    TD_diff_F1_F2 = ifelse(random_corner == "Red", 
+                           R_avg_TD_landed - B_avg_TD_landed,
+                           B_avg_TD_landed - R_avg_TD_landed),
+    SIG_STR_diff_F1_F2 = ifelse(random_corner == "Red",
+                                R_avg_SIG_STR_landed - B_avg_SIG_STR_landed,
+                                B_avg_SIG_STR_landed - R_avg_SIG_STR_landed),
+    ape_index_diff_F1_F2 = ifelse(random_corner == "Red",
+                                  round(R_ape_index - B_ape_index, 2),
+                                  round(B_ape_index - R_ape_index, 2)),
+    KD_diff_F1_F2 = ifelse(random_corner=='Red',
+                           R_avg_KD - B_avg_KD,
+                           B_avg_KD - R_avg_KD),
+    HEAD_diff_F1_F2 = ifelse(random_corner=='Red',
+                             R_avg_HEAD_landed - B_avg_HEAD_landed,
+                             B_avg_HEAD_landed - R_avg_HEAD_landed),
+    LWS_diff_F1_F2 = ifelse(random_corner=='Red',
+                            R_longest_win_streak - B_longest_win_streak,
+                            B_longest_win_streak - R_longest_win_streak),
+    CWS_diff_F1_F2 = ifelse(random_corner=='Red',
+                            R_current_win_streak - B_current_win_streak,
+                            B_current_win_streak - R_current_win_streak),
+    CLS_diff_F1_F2 = ifelse(random_corner=='Red',
+                            R_current_lose_streak - B_current_lose_streak,
+                            B_current_lose_streak - R_current_lose_streak)
+  )
+```
+We can then split lightweights_df into a training and test set, 
+with an 80-20 split:
+```{r}
+# Adding a random Boolean indicator for the split, with 0.8 and 0.2 probability
+set.seed(69)
+lightweights_df <- lightweights_df %>%
+  mutate(is_train = sample(c(TRUE, FALSE), nrow(.), replace = TRUE, prob = c(0.8, 0.2)))
+```
+
+```{r}
+train_set <- lightweights_df %>%
+  filter(is_train) %>%
+  select(Height_diff_F1_F2, Reach_diff_F1_F2, Age_diff_F1_F2, Exp_diff_F1_F2, TD_diff_F1_F2, SIG_STR_diff_F1_F2, ape_index_diff_F1_F2, KD_diff_F1_F2, HEAD_diff_F1_F2, LWS_diff_F1_F2, Wins_diff_F1_F2, Losses_diff_F1_F2, CWS_diff_F1_F2, CLS_diff_F1_F2, F1_color, F1_win)
+
+test_set <- lightweights_df %>%
+  filter(!is_train) %>%
+  select(Height_diff_F1_F2, Reach_diff_F1_F2, Age_diff_F1_F2, Exp_diff_F1_F2, TD_diff_F1_F2, SIG_STR_diff_F1_F2, ape_index_diff_F1_F2, KD_diff_F1_F2, HEAD_diff_F1_F2, LWS_diff_F1_F2, Wins_diff_F1_F2, Losses_diff_F1_F2, CWS_diff_F1_F2, CLS_diff_F1_F2, F1_color, F1_win)
+```
+
+Let's check for balancing of the training set:
+```{r}
+F1_win_table <- rbind(table(lightweights_df$F1_win), table(train_set$F1_win), table(test_set$F1_win))
+colnames(F1_win_table)<-c('F1 loss', 'F1 win')
+rownames(F1_win_table)<-c('All lightw.', 'Train set', 'Test set')
+print(F1_win_table)
+```
+For our classification model to be of significant use, it needs to perform better
+than a zero rule predictor. 
+A zero rule predictors always outputs the most frequent class in the training
+data, regardless of input.
+
+We can also assess the balancing of the response variable by checking whether
+the zero predictor training accuracy is close to 50%:
+```{r}
+if(length(which(train_set$F1_win==1))>length(which(train_set$F1_win==0))){
+  print(paste0("Zero predictor (F1 win) train accuracy: ", round(length(which(train_set$F1_win==1))/nrow(train_set), 2)*100, "%"))
+} else {
+  print(paste0("Zero predictor (F1 loss) train accuracy: ", round(length(which(train_set$F1_win==0))/nrow(train_set), 2)*100, "%"))
+}
+```
+Scaling features:
+```{r}
+# Selecting features to be scaled
+features_to_scale <- train_set %>% select(-F1_color, -F1_win)
+# Scaling
+preProcValues <- preProcess(features_to_scale, method = c("center", "scale"))
+scaled_features <- predict(preProcValues, features_to_scale)
+# Recombining
+train_set <- cbind(scaled_features, train_set %>% select(F1_color, F1_win))
+
+# Selecting features to be scaled
+features_to_scale <- test_set %>% select(-F1_color, -F1_win)
+# Scaling
+preProcValues <- preProcess(features_to_scale, method = c("center", "scale"))
+scaled_features <- predict(preProcValues, features_to_scale)
+# Recombining
+test_set <- cbind(scaled_features, test_set %>% select(F1_color, F1_win))
+```
+
+Now it's time for modeling.
+
+First, given how certain features seem to be correlated with color assignment,
+we must first perform a logistic regression to evaluate their correlation.
+A correlation will be considered sufficient if the corresponding fit coefficient
+is higher than 0.4 with an error lower than 0.15.
+
+Let's first analyze victories and win streaks. Since they are correlated, we must
+also consider interactions, otherwise, by putting them all into the logistic model
+we would get bad p-values.
+```{r}
+glm.color<-glm(F1_color ~ LWS_diff_F1_F2+Wins_diff_F1_F2+CWS_diff_F1_F2 , data=train_set, family = binomial)
+summary(glm.color)
+```
+It seems LWS and Wins are correlated to color, as expected from the EDA in the python part.
+
+For losses:
+```{r}
+glm.color<-glm(F1_color ~ CLS_diff_F1_F2+Losses_diff_F1_F2 , data=train_set, family = binomial)
+summary(glm.color)
+```
+Losses_diff has also a correlation with F1_color.
+
+For other features (we will discard ape index as it is correlated to height and
+reach):
+```{r}
+glm.color<-glm(F1_color ~ Height_diff_F1_F2+Reach_diff_F1_F2+Age_diff_F1_F2+Exp_diff_F1_F2+TD_diff_F1_F2+HEAD_diff_F1_F2+SIG_STR_diff_F1_F2+KD_diff_F1_F2, data=train_set, family = binomial)
+summary(glm.color)
+```
+Clearly Exp_diff is correlated to color assignment.
+
+The correlation between height, reach and ape index also needs to be accounted for:
+```{r}
+cor_matrix <- cor(lightweights_df[, c("Height_diff_F1_F2", "Reach_diff_F1_F2", "ape_index_diff_F1_F2")], use = "complete.obs")
+print(cor_matrix)
+```
+As well as the correlation between SIG_STR and HEAD.
+
+Having many features to choose from, we will perform backwards selection using
+the MASS package, specifically stepAIC. 
+
+It will try to optimize the AIC score by reducing the number of features, starting
+from the complete set:
+```{r}
+# Full model
+full_model <- glm(F1_win ~ ., data = train_set, family = binomial)
+
+# Backward selection
+glm.fit <- stepAIC(full_model, data=train_set, direction = "backward")
+```
+We can see that is has selected:
+Height_diff_F1_F2 + Age_diff_F1_F2 + Exp_diff_F1_F2 + 
+    TD_diff_F1_F2 + Wins_diff_F1_F2 + F1_color
+as features. 
+However, as noted, Exp and color are highly correlated.
+In theory we should therefore remove either color or Exp. However, after experimenting 
+with both options, we observed that test accuracy and classification informedness 
+are lower when including both.
+We will expand of this in the conclusion:
+```{r}
+glm.fit<-glm(F1_win ~ Height_diff_F1_F2 + Age_diff_F1_F2 + Exp_diff_F1_F2 +
+    TD_diff_F1_F2 + Wins_diff_F1_F2 + F1_color, data = train_set, family = binomial)
+selected_features_formula<-formula(glm.fit)
+summary(glm.fit)
+```
+Now let us compute predictions for the train set and print the confusion matrix:
+```{r}
+glm.probabilities <- predict(glm.fit, type='response')
+glm.predictions <- ifelse(glm.probabilities > 0.5, 1, 0)
+
+confusion_matrix <- table(Predicted = glm.predictions, Actual = train_set$F1_win)
+print(confusion_matrix)
+
+print(paste0('Training accuracy: ', round(mean(glm.predictions==train_set$F1_win),2)*100, '%'))
+```
+Whereas, on the test set:
+```{r}
+glm.probabilities <- predict(glm.fit, newdata = test_set, type='response')
+glm.predictions <- ifelse(glm.probabilities > 0.5, 1, 0)
+
+confusion_matrix <- table(Predicted = glm.predictions, Actual = test_set$F1_win)
+print(confusion_matrix)
+
+print(paste0('Test accuracy: ', round(mean(glm.predictions==test_set$F1_win),2)*100, '%'))
+print(paste0('Test prediction error: ', round(mean(glm.predictions!=test_set$F1_win),2)*100, '%'))
+
+# True Positives (TP)
+true_positives <- sum(glm.predictions == 1 & test_set$F1_win == 1)
+
+# False Negatives (FN)
+false_negatives <- sum(glm.predictions == 0 & test_set$F1_win == 1)
+
+# True Negatives (TN)
+true_negatives <- sum(glm.predictions == 0 & test_set$F1_win == 0)
+
+# False Positives (FP)
+false_positives <- sum(glm.predictions == 1 & test_set$F1_win == 0)
+
+# Sensitivity
+sensitivity <- true_positives / (true_positives + false_negatives)
+
+# Specificity
+specificity <- true_negatives / (true_negatives + false_positives)
+
+# Print results
+print(paste("Sensitivity:", round(sensitivity,2)))
+print(paste("Specificity:", round(specificity,2)))
+print(paste("Informedness:", round(specificity+sensitivity-1, 2)))
+```
+To optimize the decision threshold, the ROC curve will be plotted.
+First, we compute specificity and sensitivity, for different thresholds:
+```{r}
+threshold_results <- data.frame(threshold = numeric(), sensitivity = numeric(), specificity = numeric())
+thresholds <- seq(0.4, 0.6, by = 0.01)
+
+# Loop over thresholds
+for (threshold in thresholds) {
+  glm.predictions <- ifelse(glm.probabilities > threshold, 1, 0)
+  
+  # Confusion matrix
+  table <- table(test_set$F1_win, glm.predictions)
+  
+  # Calculate sensitivity and specificity
+  sens <- table[2,2] / (table[2,2] + table[2,1])
+  spec <- table[1,1] / (table[1,1] + table[1,2])
+  
+  # Store results
+  threshold_results <- rbind(threshold_results, data.frame(threshold, sensitivity = sens, specificity = spec))
+}
+```
+Then, we find the threshold that maximizes their sum:
+```{r}
+max_specsens_sum <- -Inf
+optimal_threshold <- NA
+
+for (i in 1:nrow(threshold_results)) {
+  # Calculate sum of sensitivity and specificity
+  specsens_sum <- threshold_results$sensitivity[i] + threshold_results$specificity[i]
+
+  # Check if this is the maximum so far
+  if (specsens_sum > max_specsens_sum) {
+    max_specsens_sum <- specsens_sum
+    optimal_threshold <- threshold_results$threshold[i]
+  }
+}
+
+# Print the optimal threshold
+print(paste("Optimal Threshold:", optimal_threshold))
+```
+Which, in the plot, corresponds to:
+```{r}
+optimal_row <- threshold_results[threshold_results$threshold == optimal_threshold,]
+optimal_sensitivity <- optimal_row$sensitivity
+optimal_specificity <- optimal_row$specificity
+
+# Plot ROC curve using ggplot2 with the optimal point highlighted
+ggplot(threshold_results, aes(x = 1-specificity, y = sensitivity)) +
+  geom_line() +
+  geom_point() +
+  geom_point(aes(x = 1-optimal_specificity, y = optimal_sensitivity), color = "#0af6ee", size = 4, shape = 3) +
+  xlab("1 - Specificity") +
+  ylab("Sensitivity") +
+  ggtitle("ROC Curve with Optimal Threshold") +
+  theme_minimal()
+```
+We then reevaluate the model on the test set using the optimal threshold:
+```{r}
+glm.probabilities <- predict(glm.fit, newdata = test_set, type='response')
+glm.predictions <- ifelse(glm.probabilities > optimal_threshold, 1, 0)
+
+confusion_matrix <- table(Predicted = glm.predictions, Actual = test_set$F1_win)
+print(confusion_matrix)
+
+print(paste0('Test accuracy: ', round(mean(glm.predictions==test_set$F1_win),2)*100, '%'))
+print(paste0('Test prediction error: ', round(mean(glm.predictions!=test_set$F1_win),2)*100, '%'))
+
+# True Positives (TP)
+true_positives <- sum(glm.predictions == 1 & test_set$F1_win == 1)
+
+# False Negatives (FN)
+false_negatives <- sum(glm.predictions == 0 & test_set$F1_win == 1)
+
+# True Negatives (TN)
+true_negatives <- sum(glm.predictions == 0 & test_set$F1_win == 0)
+
+# False Positives (FP)
+false_positives <- sum(glm.predictions == 1 & test_set$F1_win == 0)
+
+# Sensitivity
+sensitivity <- true_positives / (true_positives + false_negatives)
+
+# Specificity
+specificity <- true_negatives / (true_negatives + false_positives)
+
+# Print results
+print(paste("Sensitivity:", round(sensitivity,2)))
+print(paste("Specificity:", round(specificity,2)))
+print(paste("Informedness:", round(specificity+sensitivity-1, 2)))
+```
+Now that we know what features to take, to better assess the prediction accuracy
+of the model, we will perform 5-fold cross validation.
+We will train the model using 5 different splits, find the best threshold on the
+training set and then outputting the resulting test accuracy.
+First, we need to recombine lightweights_df:
+```{r}
+lightweights_df <- bind_rows(train_set, test_set)
+
+set.seed(69)
+folds <- createFolds(lightweights_df$F1_win, k = 5)
+```
+
+```{r}
+for(i in 1:length(folds)) {
+  print('---New iteration---')
+  # Splitting the data into training and test sets for the current fold
+  train_indices <- folds[[i]]
+  test_indices <- setdiff(1:nrow(lightweights_df), train_indices)
+
+  train_set <- lightweights_df[train_indices, ]
+  test_set <- lightweights_df[test_indices, ]
+
+  # Fit the model on the training set
+  glm.fit <- glm(selected_features_formula, family = binomial, data = train_set)
+  
+  # Find best threshold
+  glm.probabilities <- predict(glm.fit, newdata = test_set, type='response')
+
+  threshold_results <- data.frame(threshold = numeric(), sensitivity = numeric(), specificity = numeric())
+  thresholds <- seq(0.4, 0.6, by = 0.01)
+  
+  # Loop over thresholds
+  for (threshold in thresholds) {
+    glm.predictions <- ifelse(glm.probabilities > threshold, 1, 0)
+    
+    # Confusion matrix
+    table <- table(test_set$F1_win, glm.predictions)
+    
+    # Calculate sensitivity and specificity
+    sens <- table[2,2] / (table[2,2] + table[2,1])
+    spec <- table[1,1] / (table[1,1] + table[1,2])
+    
+    # Store results
+    threshold_results <- rbind(threshold_results, data.frame(threshold, sensitivity = sens, specificity = spec))
+  }
+  max_specsens_sum <- -Inf
+  optimal_threshold <- NA
+  glm.predictions <- ifelse(glm.probabilities > 0.5, 1, 0)
+  print(paste0('Training accuracy: ', round(mean(glm.predictions==test_set$F1_win),2)*100, '%'))
+  
+  for (i in 1:nrow(threshold_results)) {
+    # Calculate sum of sensitivity and specificity
+    specsens_sum <- threshold_results$sensitivity[i] + threshold_results$specificity[i]
+  
+    # Check if this is the maximum so far
+    if (specsens_sum > max_specsens_sum) {
+      max_specsens_sum <- specsens_sum
+      optimal_threshold <- threshold_results$threshold[i]
+    }
+  }
+
+  glm.probabilities <- predict(glm.fit, newdata = test_set, type='response')
+  glm.predictions <- ifelse(glm.probabilities > optimal_threshold, 1, 0)
+
+  print(paste0('Optimal threshold: ', optimal_threshold))
+  print(paste0('Test accuracy: ', round(mean(glm.predictions==test_set$F1_win),2)*100, '%'))
+  print(paste("Test sensitivity:", round(sensitivity,2)))
+  print(paste("Test specificity:", round(specificity,2)))
+  print(paste("Test informedness:", round(specificity+sensitivity-1, 2)))
+}
+```
+Conclusions:
+We have confirmed that UFC fighters' corner color is not assigned at random. 
+Given its correlation to factors like the number of rounds fought and victory 
+streaks, it's not surprising that it is a strong predictor of victory in our model.
+
+Our modeling approach, guided by backward selection, indicated that including 
+both rounds fought (Exp) and color yields the best predictive performance. This 
+decision, while typically raising concerns about multicollinearity, was taken 
+with a focus on prediction rather than interpretation. 
+
+We acknowledge that including highly correlated features like Exp and color could
+affect the interpretability of the model, but our primary objective was to enhance 
+predictive accuracy and classification quality metrics.
+
+This inclusion did not lead to significant overfitting, and the model's test
+accuracy, ranging from 65 to 68%, is an improvement over the trivial classifier, 
+given that the response variable is balanced in this context.
+
+Future work may benefit from exploring different or more extensive feature 
+selection techniques, possibly incorporating interaction terms. 
+
+Such explorationcould lead to a model that better predicts victory and 
+simultaneously accounts for color, using more objective predictors. 
+Overcoming these limitations may reveal a more robust predictive model, 
+moving beyond the reliance on color assignment, which is determined arbitrarily 
+by the promotion company.
